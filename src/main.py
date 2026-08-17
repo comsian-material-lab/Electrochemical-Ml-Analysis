@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import xml.etree.ElementTree as ET
+import json
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
@@ -22,6 +22,15 @@ from sklearn.neural_network import MLPRegressor
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
+
+# ==============================
+# GLOBAL REPRODUCIBILITY SETTINGS
+# ==============================
+# A single, uniform random seed is used everywhere a stochastic process occurs:
+# train/test splitting AND every model that has internal randomness
+# (tree bootstrapping, weight initialization, subsampling, etc.).
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
 
 # ==============================
 # COLORS
@@ -44,27 +53,57 @@ def to_subscript(text):
 # ==============================
 # MODELS
 # ==============================
+# NOTE ON HYPERPARAMETERS:
+# Random Forest is fixed at n_estimators=200 everywhere it appears, including
+# as a base learner inside the Stacking Regressor (previously this was
+# inconsistently set to 150 there). random_state=42 is now applied to every
+# stochastic estimator so that results are exactly reproducible across runs.
+RF_N_ESTIMATORS = 200
+ET_N_ESTIMATORS = 200
+MLP_MAX_ITER = 2000
+KNN_KS = [5, 7, 9]
+
 def get_models():
     models = {
-        "Random Forest": RandomForestRegressor(n_estimators=200),
-        "Gradient Boosting": GradientBoostingRegressor(),
-        "Extra Trees": ExtraTreesRegressor(n_estimators=200),
-        "HistGB": HistGradientBoostingRegressor(),
-        "SVR": SVR(),
-        "KNN (5)": KNeighborsRegressor(5),
-        "KNN (7)": KNeighborsRegressor(7),
-        "KNN (9)": KNeighborsRegressor(9),
-        "MLP": MLPRegressor(max_iter=2000),
-        "Linear": LinearRegression(),
-        "XGBoost": XGBRegressor(),
-        "LightGBM": LGBMRegressor(),
-        "CatBoost": CatBoostRegressor(verbose=0)
+        "Random Forest": RandomForestRegressor(
+            n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE
+        ),
+        "Gradient Boosting": GradientBoostingRegressor(
+            random_state=RANDOM_STATE
+        ),
+        "Extra Trees": ExtraTreesRegressor(
+            n_estimators=ET_N_ESTIMATORS, random_state=RANDOM_STATE
+        ),
+        "HistGB": HistGradientBoostingRegressor(
+            random_state=RANDOM_STATE
+        ),
+        "SVR": SVR(),  # SVR (RBF kernel) is deterministic given fixed data/scaling; no random_state param exists
+        "KNN (5)": KNeighborsRegressor(KNN_KS[0]),
+        "KNN (7)": KNeighborsRegressor(KNN_KS[1]),
+        "KNN (9)": KNeighborsRegressor(KNN_KS[2]),
+        "MLP": MLPRegressor(
+            max_iter=MLP_MAX_ITER, random_state=RANDOM_STATE
+        ),
+        "Linear": LinearRegression(),  # deterministic, no seed needed
+        "XGBoost": XGBRegressor(
+            random_state=RANDOM_STATE
+        ),
+        "LightGBM": LGBMRegressor(
+            random_state=RANDOM_STATE
+        ),
+        "CatBoost": CatBoostRegressor(
+            verbose=0, random_state=RANDOM_STATE
+        )
     }
 
     stacking = StackingRegressor(
         estimators=[
-            ("rf", RandomForestRegressor(150)),
-            ("gbr", GradientBoostingRegressor()),
+            ("rf", RandomForestRegressor(
+                n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE
+            )),
+            ("gbr", GradientBoostingRegressor(
+                random_state=RANDOM_STATE
+            )),
             ("svr", SVR())
         ],
         final_estimator=LinearRegression()
@@ -74,13 +113,59 @@ def get_models():
     return models
 
 # ==============================
+# HYPERPARAMETER / CONFIG LOG (for Supplementary Table)
+# ==============================
+def log_model_config():
+    """
+    Records the exact hyperparameters and random seed used for every model,
+    to be reported in the manuscript / supplementary materials for full
+    reproducibility, as requested by the reviewer.
+    """
+    config = {
+        "global_random_state": RANDOM_STATE,
+        "train_test_split": {"test_size": 0.2, "random_state": RANDOM_STATE},
+        "models": {
+            "Random Forest": {"n_estimators": RF_N_ESTIMATORS, "random_state": RANDOM_STATE,
+                               "other_params": "scikit-learn defaults"},
+            "Gradient Boosting": {"random_state": RANDOM_STATE, "other_params": "scikit-learn defaults"},
+            "Extra Trees": {"n_estimators": ET_N_ESTIMATORS, "random_state": RANDOM_STATE,
+                             "other_params": "scikit-learn defaults"},
+            "HistGB": {"random_state": RANDOM_STATE, "other_params": "scikit-learn defaults"},
+            "SVR": {"kernel": "rbf", "other_params": "scikit-learn defaults (deterministic, no seed)"},
+            "KNN (5)": {"n_neighbors": 5, "other_params": "scikit-learn defaults (deterministic, no seed)"},
+            "KNN (7)": {"n_neighbors": 7, "other_params": "scikit-learn defaults (deterministic, no seed)"},
+            "KNN (9)": {"n_neighbors": 9, "other_params": "scikit-learn defaults (deterministic, no seed)"},
+            "MLP": {"max_iter": MLP_MAX_ITER, "random_state": RANDOM_STATE,
+                     "other_params": "scikit-learn defaults"},
+            "Linear": {"other_params": "scikit-learn defaults (deterministic, no seed)"},
+            "XGBoost": {"random_state": RANDOM_STATE, "other_params": "xgboost defaults"},
+            "LightGBM": {"random_state": RANDOM_STATE, "other_params": "lightgbm defaults"},
+            "CatBoost": {"random_state": RANDOM_STATE, "verbose": 0, "other_params": "catboost defaults"},
+            "Stacking Regressor": {
+                "base_learners": [
+                    {"name": "Random Forest", "n_estimators": RF_N_ESTIMATORS, "random_state": RANDOM_STATE},
+                    {"name": "Gradient Boosting", "random_state": RANDOM_STATE},
+                    {"name": "SVR", "kernel": "rbf"}
+                ],
+                "final_estimator": "Linear Regression"
+            }
+        }
+    }
+    with open("model_hyperparameters_and_seeds.json", "w") as f:
+        json.dump(config, f, indent=2)
+    return config
+
+# ==============================
 # STORAGE
 # ==============================
 stacking_summary = {}
+dataset_size_records = []  # collects per-material, per-scan-rate dataset sizes
 
 # ==============================
 # MAIN LOOP
 # ==============================
+log_model_config()
+
 for file in file_names:
 
     print(f"\n🚀 Processing: {file}")
@@ -112,8 +197,17 @@ for file in file_names:
         y = df[current_col].values
 
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=0.2, random_state=RANDOM_STATE
         )
+
+        # Record dataset sizes for the Supplementary Table requested by the reviewer
+        dataset_size_records.append({
+            "Material": file_clean,
+            "Scan Rate": scan_rate,
+            "Total Points (after dropna)": len(df),
+            "Training Samples": len(X_train),
+            "Test Samples": len(X_test)
+        })
 
         scaler = StandardScaler()
         X_train_s = scaler.fit_transform(X_train)
@@ -138,7 +232,8 @@ for file in file_names:
                     "R2": r2_score(y_test, y_pred)
                 }
 
-            except:
+            except Exception as e:
+                print(f"⚠️  {name} failed on {file_clean} / {scan_rate}: {e}")
                 results[name][scan_rate] = None
 
     # ==============================
@@ -158,13 +253,17 @@ for file in file_names:
         y = df[current_col].values
 
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=0.2, random_state=RANDOM_STATE
         )
 
         stack_model = StackingRegressor(
             estimators=[
-                ("rf", RandomForestRegressor(150)),
-                ("gbr", GradientBoostingRegressor()),
+                ("rf", RandomForestRegressor(
+                    n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE
+                )),
+                ("gbr", GradientBoostingRegressor(
+                    random_state=RANDOM_STATE
+                )),
                 ("svr", SVR())
             ],
             final_estimator=LinearRegression()
@@ -234,7 +333,7 @@ for file in file_names:
         plt.close()
 
     # ==============================
-    # BOXPLOTS (FIXED)
+    # BOXPLOTS
     # ==============================
     for metric in ["R2","RMSE","MSE","MAE"]:
 
@@ -268,6 +367,25 @@ for file in file_names:
 
         plt.savefig(f"{file_clean}/box_{metric}.png", dpi=300)
         plt.close()
+
+    # ==============================
+    # PER-MATERIAL METRICS TABLE (all models, all scan rates)
+    # ==============================
+    rows = []
+    for model_name in models:
+        for sr in scan_rates:
+            res = results[model_name][sr]
+            if res is not None:
+                rows.append({
+                    "Material": file_clean,
+                    "Model": model_name,
+                    "Scan Rate": sr,
+                    "R2": res["R2"],
+                    "RMSE": res["RMSE"],
+                    "MAE": res["MAE"],
+                    "MSE": res["MSE"]
+                })
+    pd.DataFrame(rows).to_excel(f"{file_clean}/all_model_metrics.xlsx", index=False)
 
 # ==============================
 # STACKING COMPARISON (SUBSCRIPT LEGEND)
@@ -304,4 +422,12 @@ plot_stacking("RMSE", "RMSE", "Stacking_RMSE.png")
 plot_stacking("MAE", "MAE", "Stacking_MAE.png")
 plot_stacking("MSE", "MSE", "Stacking_MSE.png")
 
-print("\n✅ FINAL SYSTEM COMPLETE (SUBSCRIPT + ALL FIXES)")
+# ==============================
+# DATASET SIZE TABLE (Supplementary Table requested by reviewer)
+# ==============================
+dataset_size_df = pd.DataFrame(dataset_size_records)
+dataset_size_df.to_excel("dataset_sizes_per_material_scan_rate.xlsx", index=False)
+print("\n📊 Dataset size table saved: dataset_sizes_per_material_scan_rate.xlsx")
+print("🔧 Model hyperparameters/seed log saved: model_hyperparameters_and_seeds.json")
+
+print("\n✅ FINAL SYSTEM COMPLETE (REPRODUCIBLE SEEDS + HARMONIZED HYPERPARAMETERS + REPORTING)")
